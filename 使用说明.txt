@@ -5,7 +5,7 @@ README.md 是给 GitHub 上别人看的(英文)。
 这份是给你自己看的, 按顺序照做就行。
 
 
-第一次要做的三件事
+第一次要做的四件事
 ------------------
 
 1) 装依赖
@@ -26,9 +26,32 @@ README.md 是给 GitHub 上别人看的(英文)。
 
    看到「认证通过」就行。这个脚本只读不写, 跑错了也不会留下任何东西。
 
+4) 把三样 ref 查出来(都是只读的)
+
+   python lookup.py offices        <- office_ref, 必填, 设成环境变量
+   python lookup.py sizes          <- 柜型代码, 看看 40HC 在系统里写成啥
+   python lookup.py packages       <- 件数单位, 比如 CARTON(S)
+   python lookup.py partners 关键字  <- 客户的 trade partner ref
+
+   office_ref 查到之后设成环境变量, 跟 key 一样:
+
+     [Environment]::SetEnvironmentVariable("GOFREIGHT_OFFICE_REF","那个数字","User")
+
 
 平时怎么用
 ----------
+
+   第零步   python from_report.py _报告.xlsx --eta 2026-12-05 ^
+                --vessel "CMA CGM SWORDFISH" --voyage EXX0G0E
+
+            把提单工具出的报告转成 csv。
+            ETA 要自己填 —— 舱单里没有这一列, 从到港通知上抄一个,
+            同一条船所有票都一样。
+
+            跑完它会告诉你:
+              合并了几个分单(同 MBL 多 HBL)
+              哪些港口名查不到代码(去 locodes.csv 加一行)
+              哪几票在报告里是淡紫色的(真问题, 先处理)
 
    第一步   python push.py 你的.csv
             只打印不发送, 把 JSON 看一遍
@@ -69,9 +92,16 @@ README.md 是给 GitHub 上别人看的(英文)。
 gofreight.py    所有网络请求都走这里。认证就在 __init__ 里那三行 header,
                 X-GATEWAY-TOKEN 那一行就是 key 的全部用法。
 
-payload.py      csv 的一行 -> API 要的 JSON。
+payload.py      csv 的一行 -> API 要的 JSON。字段名是照官方 OpenAPI
+                规范核对过的, 不是猜的。
                 这个文件【不联网就能测】: python payload.py
                 会打印第一票的 JSON, 看对不对一目了然。
+
+lookup.py       只读。把 office_ref / 柜型代码 / trade partner ref 查出来。
+
+from_report.py  把 _报告.xlsx 转成 csv。港口名转 UN/LOCODE, 分单合并。
+
+locodes.csv     港口名对照表。遇到新港口加一行就行, 不用改代码。
 
 check.py        只读, 验 key。拿到 key 第一个跑这个。
 
@@ -82,17 +112,55 @@ push.py         主程序。先查重再建单, 一票失败不影响其他票�
 dev/            本地假服务器, 开发用的。
 
 
-第一次真发之前, 还有一件事
---------------------------
+建单的几条硬规矩
+----------------
 
-payload.py 里的字段名是照 GoFreight 文档的示例写的, 还没逐个核对。
+这些是从 GoFreight 的 OpenAPI 规范里挖出来的, 文档正文没写全,
+但不照做会直接被打回:
 
-真发之前去 redoc(https://api.gofreight.com/)把 ocean-import/mbl 的
-完整 schema 对一遍, 以那边为准。猜错一个必填字段, 整批都会失败。
+  必填只有三个
+      mbl_no / office_ref / estimated_arrival_date(也就是 csv 里的 eta)
 
-建议顺序: 先拿【一票】真的跑一遍, 去 GoFreight 界面上肉眼看建出来的对不对,
-确认了再整批推。字段填错位、柜子挂到错的主单下面, 这种错看一眼就知道,
-对着 JSON 猜半天也猜不出来。
+  港口要填 UN/LOCODE, 不能填地名
+      对: CNSHA  USLAX        错: SHANGHAI  LOS ANGELES
+      好消息是承运人邮件标题里就带着:
+        ...-CMA CGM VIRGINIA-EXX0F0W19-CNSHA-USLAX-Notice of Arrival
+                                        ^^^^^ ^^^^^
+
+  柜型要填系统里已有的代码
+      不确定就跑 python lookup.py sizes 看可选值
+
+  收发货人在【分单】上, 不在主单上
+      而且填的是 trade partner 的 ref, 不是公司名。
+      客户得先在 GoFreight 里存在, 用 lookup.py partners 查 ref。
+      所以第一批可以先不填这三个, 建完人工补, 比填错强。
+
+  件数/重量/材积: 多柜票【只填进第一个柜】
+      这条跟直觉完全相反, 但必须照做。
+
+      整票的合计填在第一个柜上, 后面的柜这三项留空。
+      按柜分开填、或者去填那个 Total 栏 —— 界面上看着都对,
+      但【打印出来的单子是错的】。GoFreight 自己的毛病, 只能顺着来。
+
+      所以 csv 里填整票合计就行。沿用老报告那种 520,520 的写法也认,
+      脚本会自动加起来, 不用你手工算。
+
+  单位写死成 KG 和 CBM
+      规范里 weight_unit 只收 KG/LB, measurement_unit 只收 CBM/CFT。
+      不填就用账号默认值 —— 万一默认是 LB, 12528 会被当成磅,
+      差一倍多还不报错。所以脚本每次都明确写上。
+      件数单位(CARTON(S) 这种)跑 python lookup.py packages 查。
+
+港口格式和 ETA 这两条, 脚本在本地就会拦住, 根本不会发出去,
+所以不用担心白白浪费调用次数。
+
+
+还是建议先拿一票试
+------------------
+
+字段对了不代表填对了位置。先拿【一票】真的跑一遍, 去 GoFreight 界面上
+肉眼看建出来的对不对 —— 柜子挂到错的主单下面这种错, 看一眼就知道,
+对着 JSON 猜半天也猜不出来。确认了再整批推。
 
 
 key 的事, 一句话

@@ -74,6 +74,10 @@ def main():
         head = f"[{i}/{len(rows)}] {mbl}"
 
         try:
+            # build() 放在 try 里面: 港口格式错、ETA 空这些是 ValueError,
+            # 不接住的话一行坏数据会让整批崩在中途, 前面建好的还查不清
+            payload = build(row)
+
             # 先查后建。不查的话第二遍跑就会建出一堆重复的。
             if gf.find_mbl(mbl):
                 print(f"{head}  已存在, 跳过")
@@ -81,11 +85,17 @@ def main():
                 skipped += 1
                 continue
 
-            data = gf.create_ocean_import_mbl(build(row))
+            data = gf.create_ocean_import_mbl(payload)
             ref = (data or {}).get("ref", "")
             print(f"{head}  建好了  ref={ref}")
             log_result(mbl, hbl, ref, "建好了")
             created += 1
+
+        except ValueError as e:
+            # 数据本身有问题(港口不是 LOCODE、ETA 空...), 根本没发出去
+            print(f"{head}  数据有问题, 没发: {e}")
+            log_result(mbl, hbl, "", f"数据有问题: {e}")
+            failed += 1
 
         except ApiError as e:
             # 一票失败不该拖垮整批, 记下来继续下一票

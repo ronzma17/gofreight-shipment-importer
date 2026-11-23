@@ -77,23 +77,43 @@ class GoFreight:
            建单之前一定先查一次, 不然脚本跑第二遍就会建出一堆重复的。
            而且你一定会跑第二遍 —— 第一遍总有几票会失败。
         """
-        data = self._call("GET", "/api/v1/shipments/master-bills/", params={
+        data = self._call("GET", "/api/v1/shipments/master-bills", params={
             "transportation_mode": "OI",          # OI = Ocean Import
             "ocean_shipment.mbl_no": mbl_no,
         })
         return (data or {}).get("results") or []
 
-    def create_ocean_import_mbl(self, payload):
-        """建一票海运进口主单。
+    def create_ocean_import_mbl(self, mbl):
+        """建一票海运进口主单(连柜子和分单一起)。
 
-           一次调用就能把主单 + 柜子 + 分单全建出来,
-           柜子放 container_list, 分单放 hbl_list。
+           请求体是 {"data": [...]} —— 这个接口本来就收数组,
+           一次能建好几票。这里一次只放一票, 是故意的:
+           一票一个请求, 哪票失败一目了然, 不会整批一起回滚。
+
+           以后如果调用次数要省(他们按调用量计费), 可以改成
+           一次塞十几票进去, 代价是出错时不好定位。
         """
-        data = self._call("POST", "/api/v1/shipments/ocean-import/mbl/",
-                          json=payload)
+        data = self._call("POST", "/api/v1/shipments/ocean-import/mbl",
+                          json={"data": [mbl]})
         return (data or {}).get("data") or data
+
+    def offices(self):
+        """列出账号下的办公室, office_ref 从这里来(只读)。"""
+        return self._call("GET", "/api/v1/offices")
+
+    def container_sizes(self):
+        """列出系统认的柜型代码, container_size_ref 从这里来(只读)。"""
+        return self._call("GET", "/api/v1/shipments/container-sizes")
+
+    def package_units(self):
+        """列出件数单位(CARTON(S) 之类), package_unit_ref 从这里来(只读)。"""
+        return self._call("GET", "/api/v1/package-units")
+
+    def trade_partners(self, **params):
+        """查 trade partner, shipper_ref 这些从这里来(只读)。"""
+        return self._call("GET", "/api/v1/trade-partners", params=params)
 
     def custom_fields(self):
         """看看这个账号有哪些自定义字段。建单前先跑一次, 心里有数。"""
         return self._call(
-            "GET", "/api/v1/shipments/ocean-import/mbl/custom-field/")
+            "GET", "/api/v1/shipments/ocean-import/mbl/custom-field")
