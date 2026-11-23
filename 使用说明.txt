@@ -1,0 +1,107 @@
+GoFreight 自动建单 —— 中文使用说明
+=====================================
+
+README.md 是给 GitHub 上别人看的(英文)。
+这份是给你自己看的, 按顺序照做就行。
+
+
+第一次要做的三件事
+------------------
+
+1) 装依赖
+
+   pip install -r requirements.txt
+
+2) 设 key(PowerShell 里跑, 一辈子只用设一次)
+
+   [Environment]::SetEnvironmentVariable("GOFREIGHT_API_KEY","你的key","User")
+
+   设完【一定要重新开一个命令行窗口】。
+   原来那个窗口读不到新设的变量 —— 这个坑我见过太多人踩,
+   设完在旧窗口里 echo %GOFREIGHT_API_KEY% 是空的, 别以为没设上。
+
+3) 验一下 key 能不能用
+
+   python check.py
+
+   看到「认证通过」就行。这个脚本只读不写, 跑错了也不会留下任何东西。
+
+
+平时怎么用
+----------
+
+   第一步   python push.py 你的.csv
+            只打印不发送, 把 JSON 看一遍
+
+   第二步   python push.py 你的.csv --go
+            确认没问题了才加 --go
+
+   跑完看 push_log.csv, 里面记了每一票的结果和 ref。
+
+
+为什么默认不发送
+----------------
+
+因为建单是【不可逆】的。
+
+几十票垃圾数据灌进系统之后, 删起来比建起来难受得多, 而且同事可能
+已经拿去报关或者出账单了。多敲 --go 这四个字母, 换的是一次反悔的机会。
+
+
+还没拿到 key 想先跑着玩
+------------------------
+
+开两个命令行窗口:
+
+   窗口 1   python dev/mock_gofreight.py
+
+   窗口 2   set GOFREIGHT_BASE_URL=http://127.0.0.1:8900
+            set GOFREIGHT_API_KEY=LOCAL-TEST
+            python push.py examples/shipments.csv --go
+
+窗口 2 那两行 set 只在那个窗口里有效, 关掉就没了,
+不会影响你真正设好的环境变量。
+
+
+各个文件是干嘛的
+----------------
+
+gofreight.py    所有网络请求都走这里。认证就在 __init__ 里那三行 header,
+                X-GATEWAY-TOKEN 那一行就是 key 的全部用法。
+
+payload.py      csv 的一行 -> API 要的 JSON。
+                这个文件【不联网就能测】: python payload.py
+                会打印第一票的 JSON, 看对不对一目了然。
+
+check.py        只读, 验 key。拿到 key 第一个跑这个。
+
+fields.py       只读, 看账号有哪些自定义字段。
+
+push.py         主程序。先查重再建单, 一票失败不影响其他票。
+
+dev/            本地假服务器, 开发用的。
+
+
+第一次真发之前, 还有一件事
+--------------------------
+
+payload.py 里的字段名是照 GoFreight 文档的示例写的, 还没逐个核对。
+
+真发之前去 redoc(https://api.gofreight.com/)把 ocean-import/mbl 的
+完整 schema 对一遍, 以那边为准。猜错一个必填字段, 整批都会失败。
+
+建议顺序: 先拿【一票】真的跑一遍, 去 GoFreight 界面上肉眼看建出来的对不对,
+确认了再整批推。字段填错位、柜子挂到错的主单下面, 这种错看一眼就知道,
+对着 JSON 猜半天也猜不出来。
+
+
+key 的事, 一句话
+----------------
+
+谁拿到那串字符, 谁就能以公司的身份读走全部客户资料、改单、删单,
+没有二次确认。所以它只能待在系统环境变量里, 不进任何文件,
+更不能进 git。
+
+.gitignore 已经从第一个 commit 就挡住了 .env、*.key、push_log.csv
+这些东西, 但那只能挡住【还没提交过】的文件 —— 真不小心传上去了,
+改代码没用, 要立刻去 GoFreight 吊销那把 key。
