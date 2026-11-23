@@ -56,6 +56,12 @@ export GOFREIGHT_API_KEY='<your key>'
 
 ## Usage
 
+On Windows, `START.bat` wraps the steps below in a menu — check the key, look
+up refs, convert a report, preview, create. Creating for real is behind a
+typed confirmation rather than a menu number.
+
+
+
 Verify the key works. Read-only, writes nothing:
 
 ```bash
@@ -166,6 +172,7 @@ python push.py examples/shipments.csv --go
 gofreight.py    API client — auth, requests, error handling
 lookup.py       Read-only lookups for office, container size and partner refs
 from_report.py  Converts the upstream Excel report into this CSV
+START.bat       Windows menu wrapper for the steps above
 locodes.csv     Port name -> UN/LOCODE table, extend as needed
 payload.py      CSV row -> request body. No network, testable on its own
 check.py        Read-only key check
