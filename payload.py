@@ -46,6 +46,7 @@
 
 import os
 import re
+from datetime import datetime
 
 # UN/LOCODE: 2 位国家码 + 3 位地点码
 LOCODE = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}$")
@@ -86,19 +87,75 @@ def locode(value, field):
     return v
 
 
-def iso_date(v):
-    """ETA 转成 ISO 8601。
+def iso_date_opt(v):
+    """跟 iso_date 一样, 但空值返回空串而不是报错。
+       ETD 不是必填 —— B/L 上没盖 ON BOARD 戳的时候就该留空。"""
+    return iso_date(v) if str(v or "").strip() else ""
 
-       规范要求 date-time 格式。csv 里一般是 2026-12-05 这种,
-       补上时间部分就行。
+
+def iso_date(v):
+    """ETA 转成 API 要的 ISO 8601。
+
+       格式必须是 YYYY-MM-DDTHH:MM:SS, 【结尾不能有 Z】。
+       2026-11-24 实测: 发 '2026-12-02T00:00:00Z' 被打回 ——
+         HTTP 400 field: data.estimated_arrival_date,
+         reason: Invalid data format, should be YYYY-MM-DDTHH:MM:SS
+       Z 是 ISO 8601 的 UTC 标记, 大多数 API 收, GoFreight 不收。
+       规范 bundle-prod.yaml 里只写了 format: date-time, 没说清,
+       所以这条只能靠真发一票才知道。别再把 Z 加回去。
+
+       两种写法都认:
+           2026-12-05   年在前(推荐)
+           12/05/2026   月/日/年, 到港通知上就是这么印的
+
+       为什么特意管第二种: 你多半会照着到港通知抄, 而那上面写的是
+       "POD ETA: 11/02/2026"。原来的代码碰到它会变成
+       12-05-2026T00:00:00 —— 不是合法 ISO, 发出去被打回,
+       而且报错只说日期不对, 不会告诉你是格式反了。
+
+       认不出来的直接拦住, 不猜。日期猜错了比没填还糟:
+       ETA 错一天, 后面的免柜期、提柜安排全跟着错。
     """
     s = str(v or "").strip()
     if not s:
-        raise ValueError("estimated_arrival_date(eta) 是必填的, 不能空")
-    s = s.replace("/", "-")
-    if len(s) == 10:                       # 2026-12-05
-        return s + "T00:00:00Z"
-    return s
+        raise ValueError("eta 是必填的(API 的 estimated_arrival_date), 不能空")
+
+    # 已经是 ISO 日期时间的原样放行。这里要卡死成 2026-12-05 开头 ——
+    # 以前只看"有没有 T 或空格"就放行, 结果 'Dec 5 2026' 也混过去了
+    if re.match(r"^\d{4}-\d{2}-\d{2}([T ]|$)", s):
+        # 长得像不等于是真日期 —— 2026-13-45 也长这样, 还是要验一遍
+        try:
+            datetime.strptime(s[:10], "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError(f"eta = {v!r} 不是有效日期 ({e})")
+        if len(s) <= 10:
+            return s + "T00:00:00"
+        # 带了时间的: 只取【日期 + 时分秒】, 把 'Z'、'+08:00' 这类时区后缀扔掉。
+        # GoFreight 明确要 YYYY-MM-DDTHH:MM:SS, 多一个 Z 就 400。
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)", s)
+        if m:
+            hms = m.group(2)
+            return f"{m.group(1)}T{hms if len(hms) == 8 else hms + ':00'}"
+        return s[:10] + "T00:00:00"
+
+    parts = re.split(r"[/\-.]", s)
+    if len(parts) == 3:
+        a, b, c = (x.strip() for x in parts)
+        if len(a) == 4:                      # 2026-12-05
+            y, m, d = a, b, c
+        elif len(c) == 4:                    # 12/05/2026  月在前(美式)
+            y, m, d = c, a, b
+        else:
+            raise ValueError(
+                f"eta = {v!r} 看不出年份在哪。写成 2026-12-05 或 12/05/2026")
+        try:
+            dt = datetime(int(y), int(m), int(d))
+        except ValueError as e:
+            raise ValueError(f"eta = {v!r} 不是有效日期 ({e})")
+        return dt.strftime("%Y-%m-%dT00:00:00")
+
+    raise ValueError(
+        f"eta = {v!r} 格式认不出来。写成 2026-12-05 或 12/05/2026")
 
 
 def totals(row):
@@ -170,6 +227,43 @@ def build(row):
         if row.get(name):
             mbl[name] = row[name].strip()
 
+    # ---- 每票都要填的几项 ----
+    # ETD = B/L 右上角 ON BOARD 戳的日期, prep_print.py 从单子上抠的。
+    # 每票可能不一样(同一条船也会差一两天), 所以逐票填, 不是常数。
+    etd = iso_date_opt(row.get("etd"))
+    if etd:
+        mbl["estimated_departure_date"] = etd
+
+    # OB/L Type: 我们一律走 Seaway BL。规范里的取值:
+    #   E=Express BL   O=Original BL   S=Seaway BL   I=Electronic BL
+    mbl["obl_type"] = (row.get("obl_type")
+                       or os.environ.get("GOFREIGHT_OBL_TYPE") or "S").strip()
+
+    # Oversea Agent 和 CY Location 是 Trade Partner 编号(TP-xxxxxx)。
+    # 放环境变量里, 不写死 —— 沙箱和真系统的编号是两套, 写死了换账号必错。
+    #   CHINA ARTS            -> GOFREIGHT_OVERSEA_AGENT_REF
+    #   FENIX MARINE (Y257)   -> GOFREIGHT_CY_LOCATION_REF
+    for col, env, key in (
+            ("oversea_agent_ref", "GOFREIGHT_OVERSEA_AGENT_REF",
+             "oversea_agent_ref"),
+            ("cy_location_ref", "GOFREIGHT_CY_LOCATION_REF",
+             "cy_location_ref")):
+        v = row.get(col) or os.environ.get(env)
+        if v and v.strip():
+            mbl[key] = v.strip()
+
+    # ---- Ramp(转内陆铁路)专有 ----
+    # 船在洛杉矶卸, 柜子上火车去纽约。所以:
+    #   Service Term 从 CY 到 RAMP(规范里 RAMP 写作 "RM")
+    #   交货地填纽约 —— 卸货港还是洛杉矶, 两者不能混
+    ramp = str(row.get("is_ramp") or "").strip().upper() in ("Y", "YES", "1",
+                                                            "TRUE", "RAMP")
+    if ramp:
+        mbl["service_term_to"] = "RM"
+    if row.get("place_of_delivery"):
+        mbl["place_of_delivery_ref"] = locode(row["place_of_delivery"],
+                                              "place_of_delivery")
+
     # 单位。规范里 weight_unit 只收 KG/LB, measurement_unit 只收 CBM/CFT。
     # 不填的话用的是账号默认值 —— 万一默认是 LB, 12528 就会被当成磅,
     # 差了一倍多还不报错, 所以这里明确写死。
@@ -196,6 +290,21 @@ def build(row):
                 shared[name] = row[name].strip()
         # 多个分单时这几项是共用的 —— 分单各自不同的那部分
         # 现在填不了(报告里没按分单拆开), 建完人工补
+        # Express B/L 一律 Yes
+        shared["is_express"] = True
+
+        # Ramp 的票: 分单上勾 Rail, IT No. 填 PORT CLEAR。
+        # 这两项规范里【只有分单有】, 主单没有 —— 界面上主单 More 里
+        # 那个 IT No. 是把分单的显示上来的。
+        if ramp:
+            shared["is_rail"] = True
+            shared["it_no"] = (row.get("it_no")
+                               or os.environ.get("GOFREIGHT_RAMP_IT_NO")
+                               or "PORT CLEAR").strip()
+            shared["service_term_to"] = "RM"
+            if mbl.get("place_of_delivery_ref"):
+                shared["place_of_delivery_ref"] = mbl["place_of_delivery_ref"]
+
         mbl["hbl_list"] = [dict(shared, hbl_no=h) for h in hbls]
 
     return mbl

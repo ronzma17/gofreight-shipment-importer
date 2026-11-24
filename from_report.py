@@ -38,7 +38,8 @@ except ImportError:
 HERE = Path(__file__).parent
 
 # push.py / payload.py 认的列
-OUT_COLS = ["mbl_no", "hbl_no", "pol", "pod", "eta", "vessel_name", "voyage",
+OUT_COLS = ["mbl_no", "hbl_no", "pol", "pod", "place_of_delivery",
+            "etd", "eta", "is_ramp", "vessel_name", "voyage",
             "container_no", "seal_no", "container_size_ref",
             "package", "weight", "measurement",
             "shipper_ref", "consignee_ref", "notify_ref",
@@ -173,6 +174,8 @@ def main():
     # 船名/航次从报告里扫出来(prep_print.py 从 B/L 上抠的)。命令行给了就以命令行为准。
     seen_vessel = collections.Counter()
     no_vessel = []
+    n_ramp = 0
+    no_etd = []
 
     table = load_locodes()
     bad_ports = set()
@@ -209,19 +212,36 @@ def main():
         if mbl in flagged:
             problems.append(f"{mbl}  {cell(first, '状态')[:70]}")
 
+        ramp = cell(first, "运输方式").strip().upper() == "RAMP"
+        if ramp:
+            n_ramp += 1
+
         vessel, voyage = split_vessel(args.vessel or cell(first, "船名"),
                                       args.voyage or cell(first, "航次"))
         if vessel:
             seen_vessel[(vessel, voyage)] += 1
         else:
             no_vessel.append(mbl)
+        if not cell(first, "ETD"):
+            no_etd.append(mbl)
 
         out_rows.append({
             "mbl_no": mbl,
             "hbl_no": ",".join(hbls),
+            # pod 是【卸货港】(船在哪儿卸), 不是目的地。
+            # Ramp 票两者不同: 洛杉矶卸船, 纽约交货。以前这里拿的是
+            # 「目的地」, 于是那 4 票的 port_of_discharge 被填成纽约 ——
+            # 而船根本不去纽约。
             "pol": to_locode(cell(first, "起始港"), table, bad_ports),
-            "pod": to_locode(cell(first, "目的地"), table, bad_ports),
+            "pod": to_locode(cell(first, "卸货港")
+                             or cell(first, "目的地"), table, bad_ports),
+            # 交货地只有 Ramp 票要填 —— Port 票两者一样, 填了是多余的
+            "place_of_delivery": (
+                to_locode(cell(first, "目的地"), table, bad_ports)
+                if ramp else ""),
+            "etd": cell(first, "ETD"),
             "eta": args.eta,
+            "is_ramp": "Y" if ramp else "",
             "vessel_name": vessel,
             "voyage": voyage,
             "container_no": cell(first, "柜号"),
@@ -265,6 +285,14 @@ def main():
                 print("  (船名后面带着航次, 已经拆开了)")
     if len(seen_vessel) > 1:
         print("  !! 一个报告里出现了多个船名, 正常一批只有一条船, 请先核对")
+    print(f"Ramp(转内陆) {n_ramp} 票" + (
+        " -> Service Term 走 CY~RAMP, 交货地和 IT No. 另外填"
+        if n_ramp else " (这批全是 Port)"))
+    if no_etd:
+        print(f"\n!! 这 {len(no_etd)} 票没有 ETD(B/L 上的 ON BOARD 日期):")
+        print("  " + ", ".join(no_etd[:8]))
+        print("  报告是旧版的(没有【ETD】列)就重跑一次 prep_print.py")
+
     if no_vessel:
         print(f"\n!! 这 {len(no_vessel)} 票扫不到船名, 对应的票船名是空的:")
         print("  " + ", ".join(no_vessel[:8]))

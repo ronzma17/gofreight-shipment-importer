@@ -15,9 +15,11 @@ echo.
 echo   EVERY BATCH
 echo     3 = Report xlsx  -^>  shipments.csv
 echo     4 = Preview              (nothing is sent)
-echo     5 = CREATE FOR REAL
+echo     5 = CREATE  -  FIRST ONE ONLY   (do this first)
+echo     6 = CREATE  -  ALL THE REST
 echo.
-echo     6 = Open push_log.csv
+echo     7 = Open push_log.csv
+echo     8 = Look up one shipment   (read only)
 echo     0 = Quit
 echo.
 set /p c="Type a number then Enter: "
@@ -25,8 +27,10 @@ if "%c%"=="1" goto check
 if "%c%"=="2" goto refs
 if "%c%"=="3" goto convert
 if "%c%"=="4" goto preview
-if "%c%"=="5" goto create
-if "%c%"=="6" goto log
+if "%c%"=="5" goto create1
+if "%c%"=="6" goto createall
+if "%c%"=="7" goto log
+if "%c%"=="8" goto detail
 if "%c%"=="0" exit
 goto menu
 
@@ -94,22 +98,67 @@ echo.
 pause
 goto menu
 
-:create
+:detail
+cls
+echo.
+echo Look up one shipment. Nothing is changed.
+echo.
+echo   MB/L number  - e.g.  DEMO0000001
+echo   File ref     - e.g.  FOI-0000430   (full detail)
+echo.
+set "q="
+set /p q="Type one, then Enter: "
+if not defined q goto menu
+echo.
+echo %q% | findstr /b /i "FOI-" >nul
+if errorlevel 1 (python lookup.py mbl "%q%") else (python lookup.py detail "%q%")
+echo.
+pause
+goto menu
+
+:create1
 cls
 echo ============================================================
-echo   THIS CREATES SHIPMENTS IN GOFREIGHT FOR REAL
+echo   CREATE THE FIRST SHIPMENT ONLY - FOR REAL
 echo ============================================================
 echo.
 if not exist shipments.csv echo No shipments.csv yet - run 3 first. && pause && goto menu
-echo   This cannot be undone from here. Deleting them afterwards
-echo   means doing it by hand in the GoFreight web UI.
+echo   One shipment goes in. Then open GoFreight in the browser
+echo   and check it by hand: parties, container, pieces, weight,
+echo   volume, ports, ETA. Print it if that is how you check.
 echo.
-echo   Did you run 4 and read the preview?
-echo   Is shipments.csv anonymized, if this is the sandbox?
+echo   Only run 6 once this one looks right.
 echo.
 set "ok="
 set /p ok="Type  GO  to continue, anything else to go back: "
 if /i not "%ok%"=="GO" goto menu
+echo.
+python push.py shipments.csv --go -n 1
+echo.
+pause
+goto menu
+
+:createall
+cls
+echo ============================================================
+echo   THIS CREATES ALL THE REMAINING SHIPMENTS FOR REAL
+echo ============================================================
+echo.
+if not exist shipments.csv echo No shipments.csv yet - run 3 first. && pause && goto menu
+if not exist push_log.csv echo No push_log.csv - run 5 first and check that one. && pause && goto menu
+echo   This cannot be undone from here. Deleting them afterwards
+echo   means doing it by hand in the GoFreight web UI.
+echo.
+echo   Did you run 5 and check that shipment in GoFreight?
+echo   Did you run 4 and read the preview?
+echo   Is shipments.csv anonymized, if this is the sandbox?
+echo.
+echo   Shipments already in GoFreight are skipped, so the one
+echo   from step 5 will not be created twice.
+echo.
+set "ok="
+set /p ok="Type  GO ALL  to continue, anything else to go back: "
+if /i not "%ok%"=="GO ALL" goto menu
 echo.
 python push.py shipments.csv --go
 echo.
