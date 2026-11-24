@@ -52,6 +52,7 @@ pause
 goto menu
 
 :convert
+cls
 echo.
 echo Drag the report file into this window, then press Enter.
 set "xlsx="
@@ -59,14 +60,26 @@ set /p xlsx="Report xlsx: "
 if not defined xlsx goto menu
 echo.
 set "eta="
-set /p eta="ETA  (2026-12-05): "
+set /p eta="ETA  (2026-12-05  or  12/05/2026): "
 if not defined eta echo ETA is required. && pause && goto menu
-set "vsl="
-set /p vsl="Vessel name (optional): "
-set "voy="
-set /p voy="Voyage (optional): "
 echo.
-python from_report.py %xlsx% --eta "%eta%" --vessel "%vsl%" --voyage "%voy%" -o shipments.csv
+echo Vessel name is read from the report automatically.
+echo Leave the next line empty unless it comes out wrong.
+set "vsl="
+set /p vsl="Vessel name (press Enter to skip): "
+echo.
+echo ------------------------------------------------------------
+echo   The GoFreight sandbox is SHARED with other customers.
+echo   Anonymizing keeps real B/L numbers, parties and cargo
+echo   descriptions out of it. Container counts, ports, sizes,
+echo   weights and volumes are kept as they are.
+echo ------------------------------------------------------------
+set "anon=Y"
+set /p anon="Anonymize?  Y = yes (sandbox)   n = no (real data): "
+set "FLAG=--anonymize"
+if /i "%anon%"=="n" set "FLAG="
+echo.
+python from_report.py %xlsx% --eta "%eta%" --vessel "%vsl%" %FLAG% -o shipments.csv
 echo.
 pause
 goto menu
@@ -92,6 +105,7 @@ echo   This cannot be undone from here. Deleting them afterwards
 echo   means doing it by hand in the GoFreight web UI.
 echo.
 echo   Did you run 4 and read the preview?
+echo   Is shipments.csv anonymized, if this is the sandbox?
 echo.
 set "ok="
 set /p ok="Type  GO  to continue, anything else to go back: "

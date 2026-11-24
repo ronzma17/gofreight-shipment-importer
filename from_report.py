@@ -28,6 +28,8 @@ import re
 import sys
 from pathlib import Path
 
+import collections
+
 try:
     import openpyxl
 except ImportError:
@@ -85,14 +87,68 @@ def to_locode(name, table, seen_bad):
     return ""
 
 
+def split_vessel(vessel, voyage):
+    """船名和航次填到一起时拆开。
+
+       GoFreight 那边这是两个字段。但在命令行上很容易一口气敲成
+         "CMA CGM WHITE SHARK EXX0K0E"
+       然后航次那栏留空, 结果单子上航次是空的。
+
+       所以航次为空、而船名最后一段【带数字】时, 就把它当航次切出来。
+       "CMA CGM WHITE SHARK" 最后一段是 SHARK, 纯字母, 不会被误切。
+    """
+    vessel = (vessel or "").strip()
+    voyage = (voyage or "").strip()
+    if voyage or " " not in vessel:
+        return vessel, voyage
+
+    head, _, last = vessel.rpartition(" ")
+    if re.fullmatch(r"[A-Z0-9]{4,10}", last) and any(c.isdigit() for c in last):
+        return head, last
+    return vessel, voyage
+
+
+def anonymize(rows):
+    """把能认出客户的东西换掉, 只保留数据的【形状】。
+
+       为什么要有这个: GoFreight 的沙箱是【多家客户共用】的环境,
+       他们自己也写了别往里放敏感信息。但纯用假数据又测不出你真实数据里
+       那些麻烦情况 —— 多柜、分单、45HC、走 NY 的那几票。
+
+       所以这里只换掉身份, 保留形状:
+         提单号      -> DEMO 开头的流水号(分单的 A/B 后缀保留)
+         货描/唛头   -> 固定占位
+         柜号/封条   -> 换成假的, 但【柜子个数不变】
+       港口/柜型/件数/重量/材积【原样保留】——
+       这些不指向具体客户, 而且正是最该测的部分。
+    """
+    for n, r in enumerate(rows, 1):
+        r["mbl_no"] = f"DEMO{n:07d}"
+        # 分单那票有好几个 hbl, 个数要保住, 不然测不到多分单的情况
+        k = len([h for h in r["hbl_no"].split(",") if h.strip()])
+        r["hbl_no"] = ",".join(f"DEMOH{n:05d}{chr(65+i)}" for i in range(k)) if k else ""
+        ctn = [c for c in r["container_no"].split(",") if c.strip()]
+        r["container_no"] = ",".join(f"DEMU{n:04d}{i:03d}" for i in range(len(ctn)))
+        r["seal_no"] = ",".join(f"S{n:04d}{i:02d}" for i in range(len(ctn)))
+        r["description"] = "GENERAL CARGO"
+        r["mark"] = "N/M"
+        r["shipper_ref"] = r["consignee_ref"] = r["notify_ref"] = ""
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("report", help="_报告.xlsx")
     ap.add_argument("--eta", required=True,
                     help="这条船的 ETA, 比如 2026-12-05(建单必填)")
-    ap.add_argument("--vessel", default="", help="船名(可选)")
-    ap.add_argument("--voyage", default="", help="航次(可选)")
+    ap.add_argument("--vessel", default="",
+                    help="船名(可选; 默认用报告里从 B/L 扫出来的)")
+    ap.add_argument("--voyage", default="",
+                    help="航次(可选; 我们一般不填)")
     ap.add_argument("-o", "--out", default="shipments.csv")
+    ap.add_argument("--anonymize", action="store_true",
+                    help="把提单号/货描等换成假的, 只保留结构。"
+                         "往共享的沙箱环境推数据时【必须】加这个")
     args = ap.parse_args()
 
     ws = openpyxl.load_workbook(args.report, data_only=True)["明细"]
@@ -113,6 +169,10 @@ def main():
             return ""
         v = row[i]
         return "" if v is None else str(v).strip()
+
+    # 船名/航次从报告里扫出来(prep_print.py 从 B/L 上抠的)。命令行给了就以命令行为准。
+    seen_vessel = collections.Counter()
+    no_vessel = []
 
     table = load_locodes()
     bad_ports = set()
@@ -149,14 +209,21 @@ def main():
         if mbl in flagged:
             problems.append(f"{mbl}  {cell(first, '状态')[:70]}")
 
+        vessel, voyage = split_vessel(args.vessel or cell(first, "船名"),
+                                      args.voyage or cell(first, "航次"))
+        if vessel:
+            seen_vessel[(vessel, voyage)] += 1
+        else:
+            no_vessel.append(mbl)
+
         out_rows.append({
             "mbl_no": mbl,
             "hbl_no": ",".join(hbls),
             "pol": to_locode(cell(first, "起始港"), table, bad_ports),
             "pod": to_locode(cell(first, "目的地"), table, bad_ports),
             "eta": args.eta,
-            "vessel_name": args.vessel,
-            "voyage": args.voyage,
+            "vessel_name": vessel,
+            "voyage": voyage,
             "container_no": cell(first, "柜号"),
             "seal_no": cell(first, "封条"),
             "container_size_ref": cell(first, "柜型"),
@@ -171,6 +238,9 @@ def main():
             "mark": cell(first, "Marks and Numbers").replace("\n", " "),
         })
 
+    if args.anonymize:
+        out_rows = anonymize(out_rows)
+
     with open(args.out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=OUT_COLS)
         w.writeheader()
@@ -178,7 +248,27 @@ def main():
 
     # ---- 报告给人看 ----
     print(f"写出 {len(out_rows)} 票 -> {args.out}")
+    if args.anonymize:
+        print("  已脱敏: 提单号/柜号/封条/货描都换成假的了, 柜数和港口保持原样")
+    else:
+        print("  !! 没脱敏 —— 里面是真实客户资料")
+        print("     要往【共享的沙箱】推的话, 请加 --anonymize 重跑一次")
     print(f"ETA 统一填 {args.eta}")
+
+    # 船名是自动扫的, 所以必须让人看见扫出来的是什么 —— 不然错了没人知道
+    for (vs, vy), n in seen_vessel.most_common():
+        src = "命令行给的" if args.vessel else "报告里扫出来的"
+        print(f"船名({src}): {vs}" + (f"   航次: {vy}" if vy else "   航次: 空")
+              + f"   {n} 票")
+        if vy and vy not in (args.voyage, ""):
+            if f" {vy}" in (args.vessel or ""):
+                print("  (船名后面带着航次, 已经拆开了)")
+    if len(seen_vessel) > 1:
+        print("  !! 一个报告里出现了多个船名, 正常一批只有一条船, 请先核对")
+    if no_vessel:
+        print(f"\n!! 这 {len(no_vessel)} 票扫不到船名, 对应的票船名是空的:")
+        print("  " + ", ".join(no_vessel[:8]))
+        print("  报告是旧版的(没有【船名】列)就用 --vessel \"船名\" 手动给")
 
     if merged:
         print(f"\n合并了 {len(merged)} 个分单(同 MBL 多 HBL):")
